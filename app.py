@@ -134,15 +134,31 @@ with tab_leads:
             <script>
             navigator.geolocation.getCurrentPosition(
                 function(pos) {
-                    const url = new URL(window.parent.location.href);
-                    url.searchParams.set('lat', pos.coords.latitude);
-                    url.searchParams.set('lng', pos.coords.longitude);
-                    window.parent.location.href = url.toString();
+                    const lat = pos.coords.latitude;
+                    const lng = pos.coords.longitude;
+                    var topOrigin = null;
+                    try {
+                        if (window.location.ancestorOrigins && window.location.ancestorOrigins.length > 0) {
+                            topOrigin = window.location.ancestorOrigins[window.location.ancestorOrigins.length - 1];
+                        }
+                    } catch (e) {}
+
+                    if (topOrigin) {
+                        window.top.location.href = topOrigin + '/?lat=' + lat + '&lng=' + lng;
+                    } else {
+                        // خيار احتياطي إذا لم يدعم المتصفح ancestorOrigins
+                        try {
+                            window.top.location.href = '/?lat=' + lat + '&lng=' + lng;
+                        } catch (e2) {
+                            alert('تعذّر تحديث الصفحة تلقائيًا. حاول متصفحًا آخر مثل Chrome.');
+                        }
+                    }
                 },
                 function(err) {
-                    window.parent.alert('تعذّر الحصول على الموقع: ' + err.message +
+                    alert('تعذّر الحصول على الموقع: ' + err.message +
                         ' — تأكد من السماح بالوصول للموقع من إعدادات المتصفح.');
-                }
+                },
+                { timeout: 10000 }
             );
             </script>
             """,
