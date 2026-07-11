@@ -158,7 +158,7 @@ with tab_leads:
                     alert('تعذّر الحصول على الموقع: ' + err.message +
                         ' — تأكد من السماح بالوصول للموقع من إعدادات المتصفح.');
                 },
-                { timeout: 10000 }
+                { enableHighAccuracy: false, timeout: 20000, maximumAge: 60000 }
             );
             </script>
             """,
