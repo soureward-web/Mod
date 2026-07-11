@@ -120,6 +120,36 @@ with tab_dashboard:
 with tab_leads:
     st.subheader("🔍 البحث عن عملاء قريبين")
 
+    # --- قراءة الإحداثيات من رابط الصفحة إن وافق المستخدم على مشاركة موقعه ---
+    if "lat" in st.query_params and "lng" in st.query_params:
+        try:
+            st.session_state["auto_lat"] = float(st.query_params["lat"])
+            st.session_state["auto_lng"] = float(st.query_params["lng"])
+        except (ValueError, TypeError):
+            pass
+
+    if st.button("📍 استخدم موقعي الحالي"):
+        st.components.v1.html(
+            """
+            <script>
+            navigator.geolocation.getCurrentPosition(
+                function(pos) {
+                    const url = new URL(window.parent.location.href);
+                    url.searchParams.set('lat', pos.coords.latitude);
+                    url.searchParams.set('lng', pos.coords.longitude);
+                    window.parent.location.href = url.toString();
+                },
+                function(err) {
+                    window.parent.alert('تعذّر الحصول على الموقع: ' + err.message +
+                        ' — تأكد من السماح بالوصول للموقع من إعدادات المتصفح.');
+                }
+            );
+            </script>
+            """,
+            height=0,
+        )
+        st.info("⏳ بانتظار موافقتك على مشاركة الموقع من المتصفح...")
+
     source_choice = st.radio(
         "اختر مصدر البحث:",
         ["🆓 OpenStreetMap (مجاني - بدون مفتاح)", "🗺️ Google Maps (يحتاج مفتاح API)"],
@@ -129,8 +159,16 @@ with tab_leads:
 
     with st.form("maps_search_form"):
         c1, c2, c3 = st.columns(3)
-        lat = c1.number_input("خط العرض (Latitude)", value=33.5731, format="%.6f")
-        lng = c2.number_input("خط الطول (Longitude)", value=-7.5898, format="%.6f")
+        lat = c1.number_input(
+            "خط العرض (Latitude)",
+            value=st.session_state.get("auto_lat", 33.5731),
+            format="%.6f"
+        )
+        lng = c2.number_input(
+            "خط الطول (Longitude)",
+            value=st.session_state.get("auto_lng", -7.5898),
+            format="%.6f"
+        )
         radius = c3.number_input("نطاق البحث (متر)", value=5000, step=500)
 
         if use_osm:
@@ -153,11 +191,8 @@ with tab_leads:
                         leads = search_google(lat, lng, keyword, radius_meters=int(radius))
                         saved = save_google(leads)
                 st.success(f"تم العثور على {len(leads)} نتيجة، وحفظ {saved} عميل جديد ✅")
-            except Exception:
-                st.error(
-                    "⚠️ تعذّر الوصول لخدمة البحث حاليًا (قد يكون الخادم مشغولًا مؤقتًا). "
-                    "جرّب مرة أخرى بعد دقيقة، أو صغّر نطاق البحث."
-                )
+            except Exception as e:
+                st.error(f"⚠️ تعذّر إتمام البحث: {e}")
 
     st.divider()
     st.subheader("📁 استيراد عملاء من ملف CSV / Excel")
