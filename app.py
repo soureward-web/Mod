@@ -242,12 +242,17 @@ with tab_products:
         add_btn = st.form_submit_button("➕ إضافة المنتج")
 
         if add_btn and name:
-            session = get_session()
-            session.add(Product(name=name, price=price, stock_qty=int(stock), sku=sku or None))
-            session.commit()
-            session.close()
-            st.success("تمت إضافة المنتج ✅")
-            st.rerun()
+            try:
+                session = get_session()
+                session.add(Product(name=name, price=price, stock_qty=int(stock), sku=sku or None))
+                session.commit()
+                session.close()
+                st.success("تمت إضافة المنتج ✅")
+                st.rerun()
+            except Exception as e:
+                st.error(f"⚠️ تعذّرت إضافة المنتج. جرّب مرة أخرى. ({e})")
+        elif add_btn and not name:
+            st.warning("الرجاء إدخال اسم المنتج أولًا.")
 
     session = get_session()
     products = session.query(Product).all()

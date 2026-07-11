@@ -45,7 +45,13 @@ if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, echo=False, connect_args=connect_args)
+engine = create_engine(
+    DATABASE_URL,
+    echo=False,
+    connect_args=connect_args,
+    pool_pre_ping=True,   # يتحقق من صلاحية الاتصال قبل كل استخدام، ويعيد الاتصال تلقائيًا إن انقطع
+    pool_recycle=300,     # يجدد الاتصال كل 5 دقائق لتفادي إغلاق Supabase له من جهته
+)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
