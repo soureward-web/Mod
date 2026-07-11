@@ -37,7 +37,10 @@ def search_nearby_businesses(lat: float, lng: float, keyword: str, radius_meters
     out body;
     """
 
-    response = requests.post(OVERPASS_URL, data={"data": query}, timeout=30)
+    headers = {
+        "User-Agent": "LeadGenApp/1.0 (streamlit business lead finder)"
+    }
+    response = requests.post(OVERPASS_URL, data={"data": query}, headers=headers, timeout=30)
     response.raise_for_status()
     data = response.json()
 

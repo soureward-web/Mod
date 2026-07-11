@@ -144,14 +144,20 @@ with tab_leads:
         submitted = st.form_submit_button("🔎 ابحث واحفظ النتائج")
 
         if submitted:
-            with st.spinner("جاري البحث..."):
-                if use_osm:
-                    leads = search_osm(lat, lng, keyword, radius_meters=int(radius))
-                    saved = save_osm(leads)
-                else:
-                    leads = search_google(lat, lng, keyword, radius_meters=int(radius))
-                    saved = save_google(leads)
-            st.success(f"تم العثور على {len(leads)} نتيجة، وحفظ {saved} عميل جديد ✅")
+            try:
+                with st.spinner("جاري البحث..."):
+                    if use_osm:
+                        leads = search_osm(lat, lng, keyword, radius_meters=int(radius))
+                        saved = save_osm(leads)
+                    else:
+                        leads = search_google(lat, lng, keyword, radius_meters=int(radius))
+                        saved = save_google(leads)
+                st.success(f"تم العثور على {len(leads)} نتيجة، وحفظ {saved} عميل جديد ✅")
+            except Exception:
+                st.error(
+                    "⚠️ تعذّر الوصول لخدمة البحث حاليًا (قد يكون الخادم مشغولًا مؤقتًا). "
+                    "جرّب مرة أخرى بعد دقيقة، أو صغّر نطاق البحث."
+                )
 
     st.divider()
     st.subheader("📁 استيراد عملاء من ملف CSV / Excel")
