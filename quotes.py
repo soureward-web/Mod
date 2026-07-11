@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 from fpdf import FPDF
 import pandas as pd
-from database import get_session, Client, Product, Quote, QuoteItem
+from database import get_session, Client, Product, Quote, QuoteItem, Payment, StockMovement
 
 EXPORTS_DIR = os.path.join(os.path.dirname(__file__), "exports")
 os.makedirs(EXPORTS_DIR, exist_ok=True)
@@ -50,6 +50,71 @@ def create_quote(client_id: int, items: list) -> int:
     quote_id = quote.id
     session.close()
     return quote_id
+
+
+# ---------------------------------------------------------------
+# تحويل عرض سعر إلى فاتورة بيع فعلية (يخصم المخزون تلقائيًا)
+# ---------------------------------------------------------------
+def convert_quote_to_invoice(quote_id: int):
+    """
+    يُستخدم عندما يوافق العميل فعليًا ويصبح البيع حقيقيًا:
+    - يعلّم العرض كـ "فاتورة" (is_invoice=True)
+    - يخصم الكمية المباعة من مخزون كل منتج
+    - يسجّل حركة مخزون سالبة لكل صنف
+    """
+    session = get_session()
+    quote = session.query(Quote).get(quote_id)
+    if not quote:
+        session.close()
+        raise ValueError("العرض غير موجود")
+
+    if quote.is_invoice:
+        session.close()
+        return  # تم تحويله مسبقًا، لا نكرر خصم المخزون
+
+    for item in quote.items:
+        product = session.query(Product).get(item.product_id)
+        if product:
+            product.stock_qty = max(0, (product.stock_qty or 0) - item.quantity)
+            session.add(StockMovement(
+                product_id=product.id,
+                change_qty=-item.quantity,
+                reason="بيع",
+                reference=quote.quote_number,
+            ))
+
+    quote.is_invoice = True
+    session.commit()
+    session.close()
+
+
+# ---------------------------------------------------------------
+# تسجيل دفعة على فاتورة/عرض سعر
+# ---------------------------------------------------------------
+def record_payment(quote_id: int, amount: float, method: str = "نقدًا", notes: str = None):
+    session = get_session()
+    session.add(Payment(quote_id=quote_id, amount=amount, method=method, notes=notes))
+    session.commit()
+    session.close()
+
+
+def get_paid_amount(quote_id: int) -> float:
+    session = get_session()
+    payments = session.query(Payment).filter_by(quote_id=quote_id).all()
+    total_paid = sum(p.amount for p in payments)
+    session.close()
+    return total_paid
+
+
+def get_payment_status(quote) -> str:
+    """يُرجع نص حالة الدفع بناءً على المدفوع مقابل الإجمالي."""
+    paid = get_paid_amount(quote.id)
+    if paid <= 0:
+        return "غير مدفوع"
+    elif paid < quote.total_amount:
+        return f"مدفوع جزئيًا ({paid:.2f}/{quote.total_amount:.2f})"
+    else:
+        return "مدفوع بالكامل ✅"
 
 
 # ---------------------------------------------------------------

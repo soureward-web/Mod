@@ -11,11 +11,15 @@ import streamlit as st
 import pandas as pd
 import os
 
-from database import init_db, get_session, Client, Product
+from database import init_db, get_session, Client, Product, Quote
 from csv_importer import import_file
 from scraper_maps import search_nearby_businesses as search_google, save_leads_to_db as save_google
 from scraper_osm import search_nearby_businesses as search_osm, save_leads_to_db as save_osm
-from quotes import create_quote, export_quote_pdf, export_clients_excel
+from quotes import (
+    create_quote, export_quote_pdf, export_clients_excel,
+    convert_quote_to_invoice, record_payment, get_paid_amount, get_payment_status,
+)
+from suppliers import create_supplier, list_suppliers, create_purchase, list_purchases
 
 # ---------------------------------------------------------------
 init_db()
@@ -73,8 +77,9 @@ STATUS_COLORS = {
 st.title("📊 نظام إيجاد العملاء المحتملين وإدارة المبيعات")
 st.caption("لوحة تحكم مركزية لإدارة عملائك ومنتجاتك وعروض أسعارك")
 
-tab_dashboard, tab_leads, tab_products, tab_quotes = st.tabs(
-    ["🏠 لوحة التحكم", "🔍 العملاء المحتملون", "📦 المنتجات", "🧾 عروض الأسعار"]
+tab_dashboard, tab_leads, tab_products, tab_suppliers, tab_quotes, tab_payments = st.tabs(
+    ["🏠 لوحة التحكم", "🔍 العملاء المحتملون", "📦 المنتجات",
+     "🏭 الموردون والمشتريات", "🧾 عروض الأسعار والفواتير", "💰 الدفعات"]
 )
 
 # =================================================================
@@ -113,6 +118,25 @@ with tab_dashboard:
             "لا يوجد عملاء بعد. اذهب إلى تبويب **'🔍 العملاء المحتملون'** وابحث حول موقعك "
             "لتبدأ في جمع عملاء محتملين تلقائيًا، أو استورد قائمة جاهزة من ملف Excel/CSV."
         )
+
+    # --- ملخص مالي: المستحقات والأرباح التقديرية ---
+    session = get_session()
+    all_invoices = session.query(Quote).filter_by(is_invoice=True).all()
+    session.close()
+
+    if all_invoices:
+        st.divider()
+        st.subheader("💰 ملخص مالي")
+
+        total_sales = sum(inv.total_amount for inv in all_invoices)
+        total_paid = sum(get_paid_amount(inv.id) for inv in all_invoices)
+        total_outstanding = total_sales - total_paid
+
+        fc1, fc2, fc3 = st.columns(3)
+        fc1.metric("إجمالي المبيعات (فواتير)", f"{total_sales:.2f}")
+        fc2.metric("المُحصَّل", f"{total_paid:.2f}")
+        fc3.metric("المستحقات المتبقية", f"{total_outstanding:.2f}",
+                   delta_color="inverse" if total_outstanding > 0 else "off")
 
 # =================================================================
 # التبويب 2: البحث عن عملاء محتملين + إدارتهم
@@ -285,17 +309,21 @@ with tab_products:
     st.subheader("📦 إدارة المنتجات (مادية)")
 
     with st.form("add_product_form"):
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         name = c1.text_input("اسم المنتج")
-        price = c2.number_input("السعر", min_value=0.0, step=10.0)
+        price = c2.number_input("سعر البيع", min_value=0.0, step=10.0)
         stock = c3.number_input("الكمية بالمخزون", min_value=0, step=1)
+        low_threshold = c4.number_input("حد تنبيه النفاد", min_value=0, step=1, value=5)
         sku = st.text_input("رمز المنتج (SKU) - اختياري")
         add_btn = st.form_submit_button("➕ إضافة المنتج")
 
         if add_btn and name:
             try:
                 session = get_session()
-                session.add(Product(name=name, price=price, stock_qty=int(stock), sku=sku or None))
+                session.add(Product(
+                    name=name, price=price, stock_qty=int(stock),
+                    low_stock_threshold=int(low_threshold), sku=sku or None
+                ))
                 session.commit()
                 session.close()
                 st.success("تمت إضافة المنتج ✅")
@@ -310,15 +338,91 @@ with tab_products:
     session.close()
 
     if products:
+        low_stock = [p for p in products if p.stock_qty <= p.low_stock_threshold]
+        if low_stock:
+            names = "، ".join(f"{p.name} ({p.stock_qty})" for p in low_stock)
+            st.warning(f"⚠️ منتجات على وشك النفاد: {names}")
+
         pdf_df = pd.DataFrame([{
-            "المنتج": p.name, "السعر": p.price, "المخزون": p.stock_qty, "SKU": p.sku
+            "المنتج": p.name,
+            "سعر البيع": p.price,
+            "تكلفة الشراء": p.cost_price,
+            "الهامش": round(p.price - p.cost_price, 2),
+            "المخزون": p.stock_qty,
+            "SKU": p.sku,
         } for p in products])
         st.dataframe(pdf_df, use_container_width=True)
     else:
         st.info("لا توجد منتجات بعد.")
 
 # =================================================================
-# التبويب 4: عروض الأسعار
+# التبويب 4: الموردون والمشتريات
+# =================================================================
+with tab_suppliers:
+    st.subheader("🏭 الموردون")
+
+    with st.form("add_supplier_form"):
+        sc1, sc2 = st.columns(2)
+        supplier_name = sc1.text_input("اسم المورد")
+        supplier_phone = sc2.text_input("الهاتف")
+        supplier_address = st.text_input("العنوان (اختياري)")
+        add_supplier_btn = st.form_submit_button("➕ إضافة مورد")
+
+        if add_supplier_btn and supplier_name:
+            create_supplier(supplier_name, supplier_phone or None, supplier_address or None)
+            st.success("تمت إضافة المورد ✅")
+            st.rerun()
+        elif add_supplier_btn and not supplier_name:
+            st.warning("الرجاء إدخال اسم المورد.")
+
+    suppliers = list_suppliers()
+
+    st.divider()
+    st.subheader("🧾 تسجيل عملية شراء جديدة")
+
+    session = get_session()
+    products = session.query(Product).all()
+    session.close()
+
+    if not suppliers or not products:
+        st.info("أضف موردًا واحدًا ومنتجًا واحدًا على الأقل أولًا لتسجيل عملية شراء.")
+    else:
+        supplier_choice = st.selectbox("اختر المورد", suppliers, format_func=lambda s: s.name)
+
+        st.write("أدخل الكميات وتكلفة الشراء لكل منتج تريد إدخاله للمخزون:")
+        purchase_items = []
+        for p in products:
+            pc1, pc2 = st.columns(2)
+            qty = pc1.number_input(f"كمية {p.name}", min_value=0, step=1, key=f"pq_{p.id}")
+            cost = pc2.number_input(f"تكلفة الوحدة ({p.name})", min_value=0.0, step=1.0,
+                                     value=p.cost_price, key=f"pc_{p.id}")
+            if qty > 0:
+                purchase_items.append({"product_id": p.id, "quantity": qty, "unit_cost": cost})
+
+        if st.button("💾 تسجيل عملية الشراء وتحديث المخزون"):
+            if not purchase_items:
+                st.error("أدخل كمية منتج واحد على الأقل.")
+            else:
+                create_purchase(supplier_choice.id, purchase_items)
+                st.success("تم تسجيل الشراء وتحديث المخزون تلقائيًا ✅")
+                st.rerun()
+
+    st.divider()
+    st.subheader("📜 سجل المشتريات")
+    purchases = list_purchases()
+    if purchases:
+        purchases_df = pd.DataFrame([{
+            "رقم الشراء": pu.purchase_number,
+            "المورد": pu.supplier.name if pu.supplier else "-",
+            "التاريخ": pu.created_at.strftime("%Y-%m-%d %H:%M"),
+            "الإجمالي": pu.total_cost,
+        } for pu in purchases])
+        st.dataframe(purchases_df, use_container_width=True)
+    else:
+        st.info("لا توجد عمليات شراء بعد.")
+
+# =================================================================
+# التبويب 5: عروض الأسعار والفواتير
 # =================================================================
 with tab_quotes:
     st.subheader("🧾 إنشاء عرض سعر جديد")
@@ -349,3 +453,80 @@ with tab_quotes:
                 st.success("تم إنشاء عرض السعر ✅")
                 with open(pdf_path, "rb") as f:
                     st.download_button("⬇️ تحميل عرض السعر PDF", f, file_name=os.path.basename(pdf_path))
+
+    st.divider()
+    st.subheader("📜 سجل عروض الأسعار والفواتير")
+
+    session = get_session()
+    all_quotes = session.query(Quote).order_by(Quote.created_at.desc()).all()
+    session.close()
+
+    if not all_quotes:
+        st.info("لا توجد عروض أسعار بعد.")
+    else:
+        for q in all_quotes:
+            kind_badge = "🧾 فاتورة بيع" if q.is_invoice else "📋 عرض سعر"
+            payment_status = get_payment_status(q)
+            with st.expander(f"{kind_badge} — {q.quote_number} — {q.client.name if q.client else '-'} ({payment_status})"):
+                st.write(f"الإجمالي: {q.total_amount:.2f}")
+                st.write(f"التاريخ: {q.created_at.strftime('%Y-%m-%d %H:%M')}")
+                if not q.is_invoice:
+                    if st.button("✅ تحويل إلى فاتورة بيع (يخصم المخزون)", key=f"conv_{q.id}"):
+                        convert_quote_to_invoice(q.id)
+                        st.success("تم التحويل لفاتورة بيع، وخُصم المخزون تلقائيًا ✅")
+                        st.rerun()
+                else:
+                    st.caption("✅ هذه فاتورة بيع فعلية، تم خصم المخزون بالفعل.")
+
+# =================================================================
+# التبويب 6: الدفعات
+# =================================================================
+with tab_payments:
+    st.subheader("💰 تسجيل ومتابعة الدفعات")
+
+    session = get_session()
+    invoices = session.query(Quote).filter_by(is_invoice=True).order_by(Quote.created_at.desc()).all()
+    session.close()
+
+    if not invoices:
+        st.info("لا توجد فواتير بيع بعد. حوّل عرض سعر إلى فاتورة أولًا من تبويب 'عروض الأسعار والفواتير'.")
+    else:
+        invoice_choice = st.selectbox(
+            "اختر الفاتورة",
+            invoices,
+            format_func=lambda q: f"{q.quote_number} — {q.client.name if q.client else '-'} ({get_payment_status(q)})"
+        )
+
+        paid_so_far = get_paid_amount(invoice_choice.id)
+        remaining = invoice_choice.total_amount - paid_so_far
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("الإجمالي", f"{invoice_choice.total_amount:.2f}")
+        col2.metric("المدفوع", f"{paid_so_far:.2f}")
+        col3.metric("المتبقي", f"{remaining:.2f}")
+
+        with st.form("record_payment_form"):
+            pay_amount = st.number_input("مبلغ الدفعة", min_value=0.0, step=50.0)
+            pay_method = st.selectbox("طريقة الدفع", ["نقدًا", "تحويل بنكي", "شيك", "أخرى"])
+            pay_notes = st.text_input("ملاحظات (اختياري)")
+            record_btn = st.form_submit_button("💾 تسجيل الدفعة")
+
+            if record_btn and pay_amount > 0:
+                record_payment(invoice_choice.id, pay_amount, pay_method, pay_notes or None)
+                st.success("تم تسجيل الدفعة ✅")
+                st.rerun()
+            elif record_btn:
+                st.warning("أدخل مبلغًا أكبر من صفر.")
+
+        st.divider()
+        st.subheader("سجل الدفعات لهذه الفاتورة")
+        if invoice_choice.payments:
+            payments_df = pd.DataFrame([{
+                "التاريخ": p.payment_date.strftime("%Y-%m-%d %H:%M"),
+                "المبلغ": p.amount,
+                "الطريقة": p.method,
+                "ملاحظات": p.notes or "-",
+            } for p in invoice_choice.payments])
+            st.dataframe(payments_df, use_container_width=True)
+        else:
+            st.caption("لا توجد دفعات مسجلة على هذه الفاتورة بعد.")
