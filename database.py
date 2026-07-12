@@ -212,9 +212,73 @@ class StockMovement(Base):
 # ---------------------------------------------------------------
 # دالة تهيئة قاعدة البيانات (تُستدعى مرة واحدة عند أول تشغيل)
 # ---------------------------------------------------------------
+def _run_lightweight_migrations():
+    """
+    يفحص الجداول الموجودة مسبقًا (من إصدار سابق للتطبيق) ويضيف أي أعمدة جديدة
+    ناقصة فيها، دون المساس بالبيانات الحالية. آمن للتشغيل في كل مرة (idempotent).
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    existing_tables = inspector.get_table_names()
+
+    # كل عمود جديد أُضيف لاحقًا لجدول كان موجودًا من قبل: (الجدول، العمود، تعريف SQL)
+    required_columns = [
+        ("products", "cost_price", "FLOAT DEFAULT 0.0"),
+        ("products", "low_stock_threshold", "INTEGER DEFAULT 5"),
+        ("quotes", "is_invoice", "BOOLEAN DEFAULT FALSE"),
+    ]
+
+    with engine.connect() as conn:
+        for table_name, column_name, column_def in required_columns:
+            if table_name not in existing_tables:
+                continue  # الجدول نفسه غير موجود بعد، create_all سيُنشئه بكامل أعمدته
+            existing_columns = [c["name"] for c in inspector.get_columns(table_name)]
+            if column_name in existing_columns:
+                continue  # العمود موجود بالفعل، لا شيء لفعله
+            try:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}"))
+                conn.commit()
+            except Exception:
+                conn.rollback()  # تجاهل بأمان إن فشل (مثلًا صلاحيات، أو عمود أُضيف بالتزامن)
+
+
 def init_db():
     os.makedirs(os.path.join(os.path.dirname(__file__), "data"), exist_ok=True)
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine)   # يُنشئ أي جداول جديدة كليًا (مثل suppliers, payments...)
+    _run_lightweight_migrations()      # يُضيف أعمدة جديدة ناقصة للجداول القديمة   # ينشئ الجداول الجديدة فقط (الموردين، المشتريات، الدفعات...)
+    _run_migrations()                   # يضيف الأعمدة الجديدة للجداول القديمة الموجودة مسبقًا
+
+
+def _run_migrations():
+    """
+    ترحيل آمن وبسيط: يفحص الجداول الموجودة مسبقًا (قبل هذا التحديث) ويضيف
+    أي عمود جديد ناقص فيها، بدون حذف أو المساس بأي بيانات موجودة.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    existing_tables = inspector.get_table_names()
+
+    # كل جدول قديم قد يحتاج أعمدة جديدة + تعريفها المتوافق مع SQLite و PostgreSQL معًا
+    migrations = {
+        "products": [
+            ("cost_price", "FLOAT DEFAULT 0"),
+            ("low_stock_threshold", "INTEGER DEFAULT 5"),
+        ],
+        "quotes": [
+            ("is_invoice", "BOOLEAN DEFAULT FALSE"),
+        ],
+    }
+
+    with engine.begin() as conn:
+        for table, columns in migrations.items():
+            if table not in existing_tables:
+                continue  # جدول جديد بالكامل، create_all تكفّل به بالفعل
+            existing_columns = {c["name"] for c in inspector.get_columns(table)}
+            for col_name, col_def in columns:
+                if col_name not in existing_columns:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"))
 
 
 def get_session():
